@@ -1,0 +1,351 @@
+#!/usr/bin/env bash
+#
+# open-upstream-issue -- file the no-admin capability gap upstream.
+#
+# The issue text is not embedded here.  It is read from the draft file, so
+# the draft stays the single source of truth for the wording and this stays
+# a mechanism.
+#
+# Idempotent: an issue already carrying the same title is reported rather
+# than duplicated, and nothing is posted at all unless --yes is given.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+PROG=open-upstream-issue
+VERSION=1.0.0
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
+DEFAULT_FILE=$SCRIPT_DIR/../draft-upstream-issue.md
+
+QUIET=0
+TERSE=1
+NORMAL=2
+VERBOSE=3
+DEBUG=4
+level=$NORMAL
+
+usage() {
+    cat <<'EOF'
+Usage:
+  open-upstream-issue [options]
+  open-upstream-issue -h | --help
+  open-upstream-issue -V | --version
+
+Open the "cannot install without administrator" issue on the upstream
+cygwin-install-action repository.  Title and body are read from the draft
+file, which remains the single source of truth for the text.
+
+Nothing is posted unless --yes is given.  The default is a dry run, which
+still performs the duplicate check, so it is a safe way to see where things
+stand.
+
+Options:
+  -r, --repo REPO       Upstream repository
+                        [default: cygwin/cygwin-install-action]
+  -F, --file FILE       Draft file holding the title and body
+                        [default: ../draft-upstream-issue.md, beside this
+                        script]
+  -l, --label LABEL     Label for the new issue; repeatable
+  -y, --yes             Post the issue.  Without this, nothing is created.
+  -n, --dry-run         Change nothing.  The default, and wins over --yes.
+  -f, --force           Post even when a matching issue already exists
+  -C, --directory DIR   Run as if started in DIR
+  -q, --quiet           Errors only
+  -t, --terse           Minimal, machine-friendly output
+  -v, --verbose         More detail; repeatable
+  -d, --debug           Execution trace; implies --verbose
+  -h, --help            This help, exit 0
+  -V, --version         Version, exit 0
+  --                    End of options
+
+Environment, each overridden by its option:
+  OPEN_UPSTREAM_ISSUE_REPO       as --repo
+  OPEN_UPSTREAM_ISSUE_FILE       as --file
+  OPEN_UPSTREAM_ISSUE_LABEL      as --label, comma separated
+  OPEN_UPSTREAM_ISSUE_DIRECTORY  as --directory
+  OPEN_UPSTREAM_ISSUE_YES        as --yes, when 1/true/yes/on
+  OPEN_UPSTREAM_ISSUE_DRY_RUN    as --dry-run
+  OPEN_UPSTREAM_ISSUE_FORCE      as --force
+  OPEN_UPSTREAM_ISSUE_QUIET      as --quiet
+  OPEN_UPSTREAM_ISSUE_TERSE      as --terse
+  OPEN_UPSTREAM_ISSUE_VERBOSE    as --verbose
+  OPEN_UPSTREAM_ISSUE_DEBUG      as --debug
+
+Output:
+  The issue URL on stdout, whether found or created.  Diagnostics and
+  progress on stderr.
+
+Exit status:
+  0  posted, already present, or a completed dry run
+  1  failure
+  2  usage error
+EOF
+}
+
+die() {
+    printf '%s: error: %s\n' "$PROG" "$*" >&2
+    exit 1
+}
+
+usage_error() {
+    printf '%s: error: %s\n' "$PROG" "$*" >&2
+    printf 'Try: %s --help\n' "$PROG" >&2
+    exit 2
+}
+
+say() {
+    local want=$1
+    shift
+    if [ "$level" -ge "$want" ]; then
+        printf '%s\n' "$*" >&2
+    fi
+}
+
+envbool() {
+    case ${1:-} in
+        1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Loudest wins, so record every request and take the maximum at the end.
+requested=-1
+note_level() {
+    if [ "$1" -gt "$requested" ]; then
+        requested=$1
+    fi
+}
+
+repo=${OPEN_UPSTREAM_ISSUE_REPO:-cygwin/cygwin-install-action}
+file=${OPEN_UPSTREAM_ISSUE_FILE:-}
+directory=${OPEN_UPSTREAM_ISSUE_DIRECTORY:-}
+labels=()
+if [ -n "${OPEN_UPSTREAM_ISSUE_LABEL:-}" ]; then
+    IFS=, read -r -a labels <<< "$OPEN_UPSTREAM_ISSUE_LABEL"
+fi
+
+post=0
+dry_run=0
+force=0
+verbose_count=0
+debug=0
+if envbool "${OPEN_UPSTREAM_ISSUE_YES:-}"; then post=1; fi
+if envbool "${OPEN_UPSTREAM_ISSUE_DRY_RUN:-}"; then dry_run=1; fi
+if envbool "${OPEN_UPSTREAM_ISSUE_FORCE:-}"; then force=1; fi
+if envbool "${OPEN_UPSTREAM_ISSUE_QUIET:-}"; then note_level $QUIET; fi
+if envbool "${OPEN_UPSTREAM_ISSUE_TERSE:-}"; then note_level $TERSE; fi
+if envbool "${OPEN_UPSTREAM_ISSUE_VERBOSE:-}"; then verbose_count=1; fi
+if envbool "${OPEN_UPSTREAM_ISSUE_DEBUG:-}"; then debug=1; fi
+
+while [ $# -gt 0 ]; do
+    arg=$1
+    shift
+    optarg=
+    has_optarg=0
+
+    # Normalise --opt=value and short-option clusters into one shape.
+    case $arg in
+        --?*=*)
+            optarg=${arg#*=}
+            arg=${arg%%=*}
+            has_optarg=1
+            ;;
+        -[!-]?*)
+            cluster=${arg#-}
+            first=${cluster%"${cluster#?}"}
+            rest=${cluster#?}
+            case $first in
+                r|F|l|C)
+                    optarg=$rest
+                    has_optarg=1
+                    ;;
+                *)
+                    set -- "-$rest" "$@"
+                    ;;
+            esac
+            arg=-$first
+            ;;
+    esac
+
+    case $arg in
+        -r|--repo)
+            if [ $has_optarg -eq 0 ]; then
+                if [ $# -eq 0 ]; then usage_error "$arg requires a value"; fi
+                optarg=$1
+                shift
+            fi
+            repo=$optarg
+            ;;
+        -F|--file)
+            if [ $has_optarg -eq 0 ]; then
+                if [ $# -eq 0 ]; then usage_error "$arg requires a value"; fi
+                optarg=$1
+                shift
+            fi
+            file=$optarg
+            ;;
+        -l|--label)
+            if [ $has_optarg -eq 0 ]; then
+                if [ $# -eq 0 ]; then usage_error "$arg requires a value"; fi
+                optarg=$1
+                shift
+            fi
+            labels+=("$optarg")
+            ;;
+        -C|--directory)
+            if [ $has_optarg -eq 0 ]; then
+                if [ $# -eq 0 ]; then usage_error "$arg requires a value"; fi
+                optarg=$1
+                shift
+            fi
+            directory=$optarg
+            ;;
+        -y|--yes)     post=1 ;;
+        -n|--dry-run) dry_run=1 ;;
+        -f|--force)   force=1 ;;
+        -q|--quiet)   note_level $QUIET ;;
+        -t|--terse)   note_level $TERSE ;;
+        -v|--verbose) verbose_count=$((verbose_count + 1)) ;;
+        -d|--debug)   debug=1 ;;
+        -h|--help)    usage; exit 0 ;;
+        -V|--version) printf '%s %s\n' "$PROG" "$VERSION"; exit 0 ;;
+        --)
+            if [ $# -gt 0 ]; then
+                usage_error "no positional arguments are accepted: $1"
+            fi
+            break
+            ;;
+        -*)
+            usage_error "unknown option: $arg"
+            ;;
+        *)
+            usage_error "no positional arguments are accepted: $arg"
+            ;;
+    esac
+done
+
+if [ $verbose_count -ge 1 ]; then note_level $VERBOSE; fi
+if [ $verbose_count -ge 2 ]; then note_level $DEBUG; fi
+if [ $debug -eq 1 ]; then note_level $DEBUG; fi
+if [ $requested -ge 0 ]; then level=$requested; fi
+if [ $level -ge $DEBUG ]; then set -o xtrace; fi
+
+# A dry run is the safe reading of a contradictory request.
+if [ $dry_run -eq 1 ]; then post=0; fi
+
+if [ -n "$directory" ]; then
+    cd -- "$directory" || die "cannot change directory: $directory"
+fi
+
+if [ -z "$file" ]; then
+    file=$DEFAULT_FILE
+fi
+if [ ! -f "$file" ]; then
+    die "draft file not found: $file"
+fi
+
+if ! command -v gh >/dev/null 2>&1; then
+    die "gh is not on PATH; see https://cli.github.com"
+fi
+if ! gh auth status >/dev/null 2>&1; then
+    die "gh is not authenticated; run: gh auth login"
+fi
+
+title=$(awk '/^\*\*Title:\*\*/ { sub(/^\*\*Title:\*\*[ \t]*/, ""); print; exit }' "$file")
+if [ -z "$title" ]; then
+    die "no **Title:** line in $file"
+fi
+
+body=$(awk 'started { print } /^\*\*Body:\*\*/ { started = 1 }' "$file" \
+       | awk 'NF { seen = 1 } seen { print }')
+if [ -z "$body" ]; then
+    die "no body after the **Body:** line in $file"
+fi
+
+tmpdir=$(mktemp -d)
+cleanup() { rm -rf -- "$tmpdir"; }
+trap cleanup EXIT
+
+body_file=$tmpdir/body.md
+printf '%s\n' "$body" > "$body_file"
+issues=$tmpdir/issues.tsv
+prs=$tmpdir/prs.tsv
+
+say $VERBOSE "repo:  $repo"
+say $VERBOSE "draft: $file"
+say $VERBOSE "title: $title"
+
+# Idempotency: the same title must never be filed twice.  Closed issues
+# count, since a closed one means the question was already put and answered.
+if ! gh issue list --repo "$repo" --state all --limit 500 \
+        --json title,state,url --jq '.[] | [.title, .state, .url] | @tsv' \
+        > "$issues" 2>"$tmpdir/err"; then
+    say $QUIET "$(cat "$tmpdir/err")"
+    die "could not list issues on $repo"
+fi
+
+if ! gh pr list --repo "$repo" --state all --limit 500 \
+        --json title,state,url --jq '.[] | [.title, .state, .url] | @tsv' \
+        > "$prs" 2>"$tmpdir/err"; then
+    printf '' > "$prs"
+fi
+
+existing=$(awk -F'\t' -v t="$title" \
+    'tolower($1) == tolower(t) { print; exit }' "$issues")
+
+# Advisory only: someone may have raised the same thing under another title.
+related=$(cat "$issues" "$prs" \
+    | awk -F'\t' 'tolower($1) ~ /no.?admin|non.?admin|administrator|elevat/ { print }')
+if [ -n "$related" ]; then
+    say $NORMAL "related upstream threads, worth reading before posting:"
+    printf '%s\n' "$related" | while IFS=$'\t' read -r t s u; do
+        say $NORMAL "  [$s] $t"
+        say $NORMAL "        $u"
+    done
+fi
+
+if [ -n "$existing" ]; then
+    existing_state=$(printf '%s' "$existing" | cut -f2)
+    existing_url=$(printf '%s' "$existing" | cut -f3)
+    if [ $force -eq 0 ]; then
+        say $NORMAL "already filed [$existing_state]; nothing to do"
+        printf '%s\n' "$existing_url"
+        exit 0
+    fi
+    say $NORMAL "already filed [$existing_state] at $existing_url"
+    say $NORMAL "--force given, so filing another"
+fi
+
+label_args=()
+if [ ${#labels[@]} -gt 0 ]; then
+    for label in "${labels[@]}"; do
+        if [ -n "$label" ]; then
+            label_args+=(--label "$label")
+        fi
+    done
+fi
+
+if [ $post -eq 0 ]; then
+    say $NORMAL "dry run: nothing posted.  Pass --yes to post."
+    say $NORMAL "would create on $repo:"
+    say $NORMAL "  title: $title"
+    if [ ${#label_args[@]} -gt 0 ]; then
+        say $NORMAL "  labels: ${labels[*]}"
+    fi
+    say $VERBOSE "--- body ---"
+    if [ $level -ge $VERBOSE ]; then
+        cat "$body_file" >&2
+        printf -- '--- end body ---\n' >&2
+    fi
+    exit 0
+fi
+
+say $VERBOSE "creating the issue on $repo"
+url=$(gh issue create --repo "$repo" --title "$title" \
+      --body-file "$body_file" "${label_args[@]+"${label_args[@]}"}") \
+    || die "gh issue create failed"
+
+say $NORMAL "filed"
+printf '%s\n' "$url"

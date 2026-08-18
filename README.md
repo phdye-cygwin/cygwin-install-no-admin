@@ -125,6 +125,11 @@ a proposal should not oversell what follows.
    cite the `ShellExecuteEx` behaviour and the downstream precedents, and
    ask whether a `no-admin` input would be welcome. Cheap, and the
    maintainers may prefer a different shape or name than a guess.
+   `bin/open-upstream-issue` does this. It reads the title and body from
+   `draft-upstream-issue.md`, so that file stays the source of truth for
+   the wording; it refuses to file a second issue with the same title;
+   and it posts nothing without `--yes`, the default being a dry run
+   that still runs the duplicate check.
 2. If the response is positive, fork and submit the patch plus the test
    above.
 3. If it stalls or is declined, keep the fork as a maintained no-admin
@@ -133,6 +138,12 @@ a proposal should not oversell what follows.
 Fork under `phdye-cygwin`, which already holds the Cygwin work and is
 public like the upstream. This repository is deliberately not named
 `cygwin-install-action`, so that name stays free for the fork.
+
+That fork was taken on 2026-08-17: `phdye-cygwin/cygwin-install-action`,
+from `cygwin/cygwin-install-action` at `a3d7294` on `master`. It is
+cloned at `~/repo/cygwin/install-action`, with `upstream` pointing at the
+parent for fetching and its push URL set to `no_push`. Taking it early
+does not prejudge step 1; the issue still goes first.
 
 ## Related work in this org
 
@@ -153,4 +164,18 @@ comparable accommodation.
 
 ## Status
 
-Nothing here is built. Next step is the upstream issue.
+No code change is written yet. What exists is the fork, and
+`bin/open-upstream-issue` ready to file the issue. Checked 2026-08-17: no
+upstream issue or pull request, open or closed, has a title mentioning
+admin rights or elevation, so this has not been raised before.
+
+Next step is to run that script with `--yes`.
+
+## License
+
+MIT or Apache-2.0, at your option.
+
+Note for anything that moves upstream: `cygwin/cygwin-install-action` is
+GPL-3.0. Both licenses here are one-way compatible with it, so material
+from this repository can be relicensed into a patch against that project,
+but not the reverse.
